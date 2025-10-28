@@ -1,21 +1,46 @@
-# continuation_detection.py
+# continuation_detection.py - IMPROVED VERSION
 import re
 import json
 from typing import Dict, List, Tuple, Optional
 
 
 def extract_table_from_query(sql_query: str) -> List[str]:
-    """Extract table names from SQL query."""
+    """
+    Extract table names from SQL query.
+    Improved version that handles EXTRACT(... FROM column) and other edge cases.
+    """
     # Remove newlines and extra spaces
     sql_query = ' '.join(sql_query.split())
-
-    # Common patterns to find table names
+    
+    # STEP 1: Remove EXTRACT() functions to avoid false positives
+    # This removes patterns like EXTRACT(MONTH FROM PO_ENTRY_DATE)
+    sql_query = re.sub(r'EXTRACT\s*\([^)]+\)', '', sql_query, flags=re.IGNORECASE)
+    
+    # STEP 2: Remove other functions that might contain FROM
+    # e.g., SUBSTRING(column FROM position FOR length)
+    sql_query = re.sub(r'SUBSTRING\s*\([^)]+\)', '', sql_query, flags=re.IGNORECASE)
+    
+    # STEP 3: Now extract table names with improved patterns
     patterns = [
-        r'FROM\s+(\w+)',
-        r'JOIN\s+(\w+)',
-        r'INTO\s+(\w+)',
-        r'UPDATE\s+(\w+)',
-        r'TABLE\s+(\w+)'
+        # Match FROM followed by table name (possibly with schema)
+        r'\bFROM\s+(?:[\w]+\.)?(\w+)',
+        
+        # Match different types of JOINs
+        r'\bJOIN\s+(?:[\w]+\.)?(\w+)',
+        r'\bINNER\s+JOIN\s+(?:[\w]+\.)?(\w+)',
+        r'\bLEFT\s+JOIN\s+(?:[\w]+\.)?(\w+)',
+        r'\bRIGHT\s+JOIN\s+(?:[\w]+\.)?(\w+)',
+        r'\bFULL\s+JOIN\s+(?:[\w]+\.)?(\w+)',
+        r'\bCROSS\s+JOIN\s+(?:[\w]+\.)?(\w+)',
+        
+        # Match INSERT INTO
+        r'\bINTO\s+(?:[\w]+\.)?(\w+)',
+        
+        # Match UPDATE
+        r'\bUPDATE\s+(?:[\w]+\.)?(\w+)',
+        
+        # Match CREATE/ALTER TABLE
+        r'\bTABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:[\w]+\.)?(\w+)',
     ]
 
     tables = []
@@ -33,16 +58,16 @@ def is_sql_query(text: str) -> bool:
     Returns True if SQL keywords are detected.
     """
     sql_keywords = [
-        'SELECT', 'FROM', 'WHERE', 'JOIN', 'GROUP BY',
+        'SELECT', 'FROM', 'WHERE', 'JOIN', 'GROUP BY', 
         'ORDER BY', 'LIMIT', 'INSERT', 'UPDATE', 'DELETE',
         'COUNT(', 'SUM(', 'AVG(', 'MAX(', 'MIN('
     ]
-
+    
     text_upper = text.upper()
-
+    
     # Check if multiple SQL keywords are present
     keyword_count = sum(1 for keyword in sql_keywords if keyword in text_upper)
-
+    
     # If 2 or more SQL keywords found, it's likely SQL
     return keyword_count >= 2
 
@@ -87,20 +112,19 @@ def combine_questions_with_llm(current_question: str, previous_question: str, gr
     """
 
     messages = [
-        {"role": "system",
-         "content": "You are an expert at rewriting questions with inherited context. You ONLY return natural language questions, never SQL code."},
+        {"role": "system", "content": "You are an expert at rewriting questions with inherited context. You ONLY return natural language questions, never SQL code."},
         {"role": "user", "content": combination_prompt}
     ]
 
     try:
         response, _ = groq_response_func(messages)
         cleaned_response = response.strip().strip('"').strip("'")
-
+        
         # Validate that the response is not SQL
         if is_sql_query(cleaned_response):
             # Fallback to simple concatenation if LLM returns SQL
             return f"{current_question} (in context of: {previous_question})"
-
+        
         return cleaned_response
     except Exception:
         return f"{current_question} (in context of: {previous_question})"
@@ -168,8 +192,7 @@ def detect_continuation_question(
     """
 
     messages = [
-        {"role": "system",
-         "content": "You are an expert at analyzing questions. When providing a combined_question, you ALWAYS use natural language, NEVER SQL code."},
+        {"role": "system", "content": "You are an expert at analyzing questions. When providing a combined_question, you ALWAYS use natural language, NEVER SQL code."},
         {"role": "user", "content": analysis_prompt}
     ]
 
@@ -189,18 +212,18 @@ def detect_continuation_question(
 
         if result.get('is_continuation') and result.get('confidence') in ['high', 'medium']:
             combined_question = result.get('combined_question')
-
+            
             # CRITICAL VALIDATION: Check if the combined_question is SQL
             if combined_question and is_sql_query(combined_question):
                 # LLM returned SQL - use the dedicated combine function instead
                 combined_question = combine_questions_with_llm(
-                    current_question,
-                    previous_question,
+                    current_question, 
+                    previous_question, 
                     groq_response_func
                 )
-
+            
             return True, combined_question, result.get('reasoning'), list(common_tables)
-
+            
     except Exception as e:
         # Fallback to simple heuristic if LLM fails
         continuation_keywords = ['which', 'what', 'that', 'those', 'maximum', 'minimum', 'most', 'least', 'highest',
@@ -254,7 +277,7 @@ def handle_continuation_detection(
     """
     Main function to handle continuation detection.
     Returns dict with detection results and formatted response.
-
+    
     Args:
         auto_apply: If True, automatically applies continuation without prompting user
     """
@@ -314,7 +337,7 @@ def handle_continuation_detection(
         if is_sql_query(combined_question):
             # Last resort - use simple concatenation
             combined_question = f"{current_question} (continuing from: {previous_user_question})"
-
+        
         # If auto_apply is True, skip the prompt and directly use combined question
         if auto_apply:
             return {
@@ -327,7 +350,7 @@ def handle_continuation_detection(
                 "reasoning": reasoning,
                 "common_tables": common_tables
             }
-
+        
         formatted_response = format_continuation_options(
             current_question,
             combined_question,
