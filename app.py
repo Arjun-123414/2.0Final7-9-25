@@ -2532,7 +2532,7 @@ def main_app():
                     st.markdown(natural_response)
 
     if prompt := st.chat_input("Type your business question here..."):
-        message_already_added = False 
+        message_already_added = False
         # Handle correction choice first
         if hasattr(st.session_state, 'awaiting_correction_choice') and st.session_state.awaiting_correction_choice:
             prompt_lower = prompt.strip().lower()
@@ -2742,7 +2742,7 @@ def main_app():
                 schema_text,
                 get_groq_response_with_system,
                 st.session_state.last_sql_query,
-                auto_apply=should_auto_apply  # Pass the auto_apply flag
+                auto_apply=should_auto_apply
             )
 
             if continuation_result["is_continuation"]:
@@ -2758,6 +2758,7 @@ def main_app():
                         st.session_state.continuation_streak = 0
                         st.session_state.last_continuation_tables = None
                         st.warning("⚠️ Table context changed. Auto-continuation mode disabled.")
+
                         # Show the continuation prompt since context changed
                         initial_loading_placeholder.empty()
                         with st.chat_message("user"):
@@ -2777,29 +2778,27 @@ def main_app():
                         save_after_exchange()
                         st.stop()
                     else:
-                        # Auto-apply continuation
+                        # ✅ Auto-apply continuation (tables match)
                         combined_question = continuation_result["combined_question"]
                         st.session_state.last_continuation_tables = current_tables
 
                         # Clear loading animation
                         initial_loading_placeholder.empty()
 
-                if not message_already_added:
+                        # Show what user typed
                         with st.chat_message("user"):
                             st.markdown(original_prompt)
 
+                        # Show what's being processed
                         st.info(f"🤖 **Auto-continuation applied:**\n\n{combined_question}", icon="✨")
 
-                        # Add both original and combined to history
+                        # ⭐ Add COMBINED question to history (NOT original)
                         st.session_state.messages.append({"role": "user", "content": combined_question})
                         st.session_state.chat_history.append({"role": "user", "content": combined_question})
 
-
-                        # Use the combined question
+                        # Use the combined question for processing
                         prompt = combined_question
-                        final_prompt = combined_question
                         skip_continuation_check = True
-                        message_already_added = True
                 else:
                     # Manual continuation prompt (normal behavior)
                     st.session_state.last_continuation_tables = current_tables
