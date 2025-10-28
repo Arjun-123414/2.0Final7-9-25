@@ -113,10 +113,10 @@ def detect_continuation_question(
         current_sql: str,
         schema_text: str,
         groq_response_func
-) -> Tuple[bool, Optional[str], Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[str], Optional[List[str]]]:
     """
     Detect if current question is a continuation of previous question.
-    Returns: (is_continuation, suggested_combined_question, explanation)
+    Returns: (is_continuation, suggested_combined_question, explanation, common_tables)
     """
 
     # Extract tables from both queries
@@ -125,96 +125,12 @@ def detect_continuation_question(
 
     # If they don't use the same table, it's not a continuation
     if not prev_tables or not curr_tables:
-        return False, None, None
+        return False, None, None, None
 
     # Check if there's table overlap
     common_tables = set(prev_tables) & set(curr_tables)
     if not common_tables:
-        return False, None, None
-
-    # ========== ADDED: Completeness Check (from Version 1) ==========
-    # Check if current question is already complete using generic patterns
-
-    # Extract any numeric identifiers (IDs, years, amounts, etc.)
-    prev_numbers = set(re.findall(r'\b\d{3,}\b', previous_question))
-    curr_numbers = set(re.findall(r'\b\d{3,}\b', current_question))
-
-    # Extract quoted or capitalized entities (names, departments, etc.)
-    prev_entities = set(re.findall(r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*|"[^"]+"|\'[^\']+\')', previous_question))
-    curr_entities = set(re.findall(r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*|"[^"]+"|\'[^\']+\')', current_question))
-
-    # Check overlap
-    number_overlap = len(prev_numbers & curr_numbers) > 0
-    entity_overlap = len(prev_entities & curr_entities) > 0
-
-    # If current question contains identifiers/entities from previous question
-    # AND has reasonable length, it's likely self-contained
-    if (number_overlap or entity_overlap) and len(current_question.split()) > 6:
-        return False, None, None
-
-    # For questions with moderate length, check completeness via LLM
-    if len(current_question.split()) >= 6:
-        completeness_check = f"""
-        Analyze if Question 2 is complete and self-contained, or if it needs context from Question 1.
-
-        Question 1: {previous_question}
-        Question 2: {current_question}
-
-        A question is COMPLETE if it has:
-        - Clear subject (specific entity with identifier/name)
-        - Clear action/metric being requested
-        - All necessary filters/criteria
-
-        A question is INCOMPLETE if it:
-        - Uses vague pronouns (this, that, it, they) without clear antecedent
-        - Missing key context that was in Question 1
-        - Assumes entity/filter from Question 1 without stating it
-
-        Important: If Question 2 repeats the same identifiers/entities from Question 1, 
-        it is COMPLETE even if it asks for something different.
-
-        Example of COMPLETE:
-        Q1: "What is total PO value for vendor 10514?"
-        Q2: "What is total PO value for vendor 10514 in 2025?"
-        -> Complete because it has all necessary info
-
-        Example of INCOMPLETE:
-        Q1: "Which vendor has highest POs in 2025?"
-        Q2: "Give me details"
-        -> Incomplete because "details" of what/whom?
-
-        Respond with JSON:
-        {{
-            "is_complete": true/false,
-            "reasoning": "brief explanation"
-        }}
-        """
-
-        messages = [
-            {"role": "system", "content": "You are an expert at analyzing question completeness."},
-            {"role": "user", "content": completeness_check}
-        ]
-
-        try:
-            response, _ = groq_response_func(messages)
-            cleaned = response.strip()
-            if cleaned.startswith("```json"):
-                cleaned = cleaned[7:]
-            elif cleaned.startswith("```"):
-                cleaned = cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-
-            result = json.loads(cleaned.strip())
-
-            # If question is complete, don't trigger continuation
-            if result.get('is_complete'):
-                return False, None, None
-
-        except:
-            pass  # Fall through to original detection
-
-    # ========== END: Completeness Check ==========
+        return False, None, None, None
 
     # Use LLM to analyze if this is a continuation
     analysis_prompt = f"""
@@ -283,7 +199,7 @@ def detect_continuation_question(
                     groq_response_func
                 )
 
-            return True, combined_question, result.get('reasoning')
+            return True, combined_question, result.get('reasoning'), list(common_tables)
 
     except Exception as e:
         # Fallback to simple heuristic if LLM fails
@@ -298,9 +214,9 @@ def detect_continuation_question(
         if has_continuation_word and missing_context and common_tables:
             # Use LLM mechanism to combine questions meaningfully
             combined = combine_questions_with_llm(current_question, previous_question, groq_response_func)
-            return True, combined, "Question appears to reference previous context"
+            return True, combined, "Question appears to reference previous context", list(common_tables)
 
-    return False, None, None
+    return False, None, None, None
 
 
 def format_continuation_options(
@@ -332,11 +248,15 @@ def handle_continuation_detection(
         chat_history: List[Dict],
         schema_text: str,
         groq_response_func,
-        get_last_sql_query_func
+        get_last_sql_query_func,
+        auto_apply: bool = False
 ) -> Dict:
     """
     Main function to handle continuation detection.
     Returns dict with detection results and formatted response.
+
+    Args:
+        auto_apply: If True, automatically applies continuation without prompting user
     """
 
     # Find the last user question and its SQL
@@ -380,7 +300,7 @@ def handle_continuation_detection(
     current_sql = current_sql.strip()
 
     # Detect continuation
-    is_continuation, combined_question, reasoning = detect_continuation_question(
+    is_continuation, combined_question, reasoning, common_tables = detect_continuation_question(
         current_question,
         previous_user_question,
         previous_sql,
@@ -394,6 +314,19 @@ def handle_continuation_detection(
         if is_sql_query(combined_question):
             # Last resort - use simple concatenation
             combined_question = f"{current_question} (continuing from: {previous_user_question})"
+
+        # If auto_apply is True, skip the prompt and directly use combined question
+        if auto_apply:
+            return {
+                "is_continuation": True,
+                "formatted_response": None,  # No prompt needed
+                "options": None,  # No options needed
+                "auto_applied": True,
+                "combined_question": combined_question,
+                "original_sql": current_sql,
+                "reasoning": reasoning,
+                "common_tables": common_tables
+            }
 
         formatted_response = format_continuation_options(
             current_question,
@@ -409,14 +342,16 @@ def handle_continuation_detection(
                 "2": combined_question
             },
             "original_sql": current_sql,
-            "reasoning": reasoning
+            "reasoning": reasoning,
+            "common_tables": common_tables,
+            "auto_applied": False
         }
 
     return {
         "is_continuation": False,
         "formatted_response": None,
         "options": None,
-        "original_sql": current_sql
+        "common_tables": None
     }
 
 
@@ -426,7 +361,8 @@ def check_and_handle_continuation(
         messages: List[Dict],
         schema_text: str,
         groq_response_func,
-        last_sql_query: str = None
+        last_sql_query: str = None,
+        auto_apply: bool = False
 ) -> Dict:
     """
     Integration function to be called from your main application.
@@ -437,6 +373,7 @@ def check_and_handle_continuation(
         schema_text: Database schema information
         groq_response_func: Your groq response function
         last_sql_query: The SQL query from the previous question
+        auto_apply: If True, automatically applies continuation without prompting
 
     Returns:
         Dictionary with continuation detection results
@@ -455,7 +392,8 @@ def check_and_handle_continuation(
         temp_messages,
         schema_text,
         groq_response_func,
-        get_last_sql
+        get_last_sql,
+        auto_apply=auto_apply
     )
 
     return result
