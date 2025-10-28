@@ -2790,8 +2790,9 @@ def main_app():
                         st.info(f"🤖 **Auto-continuation applied:**\n\n{combined_question}", icon="✨")
 
                         # Add both original and combined to history
-                        st.session_state.messages.append({"role": "user", "content": original_prompt})
-                        st.session_state.chat_history.append({"role": "user", "content": original_prompt})
+                        st.session_state.messages.append({"role": "user", "content": combined_question})
+                        st.session_state.chat_history.append({"role": "user", "content": combined_question})
+
 
                         # Use the combined question
                         prompt = combined_question
@@ -3450,4 +3451,5 @@ if st.session_state["authenticated"]:
         main_app()
 else:
     login_page()
+
 
