@@ -2682,7 +2682,7 @@ def main_app():
                     st.info(f"✅ Continuation applied (Streak: {st.session_state.continuation_streak})")
 
                     # Enable auto mode after 2 consecutive continuations
-                    if st.session_state.continuation_streak >= 2:
+                    if st.session_state.continuation_streak >= 1:
                         st.session_state.auto_continuation_mode = True
                         st.success(
                             "🚀 **Auto-continuation mode activated!** Future related questions will automatically continue from previous context.")
@@ -3450,3 +3450,4 @@ if st.session_state["authenticated"]:
         main_app()
 else:
     login_page()
+
