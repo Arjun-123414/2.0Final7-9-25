@@ -2532,6 +2532,7 @@ def main_app():
                     st.markdown(natural_response)
 
     if prompt := st.chat_input("Type your business question here..."):
+        message_already_added = False 
         # Handle correction choice first
         if hasattr(st.session_state, 'awaiting_correction_choice') and st.session_state.awaiting_correction_choice:
             prompt_lower = prompt.strip().lower()
@@ -2783,7 +2784,7 @@ def main_app():
                         # Clear loading animation
                         initial_loading_placeholder.empty()
 
-                        # Show what happened
+                if not message_already_added:
                         with st.chat_message("user"):
                             st.markdown(original_prompt)
 
@@ -2796,7 +2797,9 @@ def main_app():
 
                         # Use the combined question
                         prompt = combined_question
+                        final_prompt = combined_question
                         skip_continuation_check = True
+                        message_already_added = True
                 else:
                     # Manual continuation prompt (normal behavior)
                     st.session_state.last_continuation_tables = current_tables
@@ -3451,5 +3454,6 @@ if st.session_state["authenticated"]:
         main_app()
 else:
     login_page()
+
 
 
