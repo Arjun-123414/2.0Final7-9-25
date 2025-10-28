@@ -1374,6 +1374,12 @@ def main_app():
         st.session_state.total_tokens = 0
     if "persistent_dfs" not in st.session_state:
         st.session_state.persistent_dfs = []
+    if "continuation_streak" not in st.session_state:
+        st.session_state.continuation_streak = 0
+    if "auto_continuation_mode" not in st.session_state:
+        st.session_state.auto_continuation_mode = False
+    if "last_continuation_tables" not in st.session_state:
+        st.session_state.last_continuation_tables = None
     if "spelling_suggestions_display" not in st.session_state:
         st.session_state.spelling_suggestions_display = None
     if "messages" not in st.session_state:
@@ -1485,6 +1491,12 @@ def main_app():
             st.session_state.pop("chat_message_tables", None)
             st.session_state.pop("current_chat_id", None)
             st.session_state.pop("last_saved_message_count", None)
+
+            # Reset auto-continuation state
+            st.session_state.continuation_streak = 0
+            st.session_state.auto_continuation_mode = False
+            st.session_state.last_continuation_tables = None
+
             st.rerun()
 
         # Clear History button
@@ -1509,11 +1521,7 @@ def main_app():
             else:
                 st.error("Failed to clear chat history.")
         # Add this in sidebar after the Learning Stats button
-        if "knowledge_base_instructions" in st.session_state and st.session_state.knowledge_base_instructions:
-            with st.expander("📚 Knowledge Base"):
-                st.markdown("*Shared instructions from all users:*")
-                for i, instruction in enumerate(st.session_state.knowledge_base_instructions, 1):
-                    st.markdown(f"{i}. {instruction}")
+
         # 4. Logout button
         if st.button("Logout"):
             # Clear all session state variables related to chat and queries
@@ -1522,6 +1530,12 @@ def main_app():
             # Reinitialize only the authentication state
             st.session_state["authenticated"] = False
             st.rerun()
+
+        if "knowledge_base_instructions" in st.session_state and st.session_state.knowledge_base_instructions:
+            with st.expander("📚 Knowledge Base"):
+                st.markdown("*Shared instructions from all users:*")
+                for i, instruction in enumerate(st.session_state.knowledge_base_instructions, 1):
+                    st.markdown(f"{i}. {instruction}")
 
     # ----------------------------------
     #  B) MAIN: Chat interface
@@ -2654,11 +2668,30 @@ def main_app():
                 """, unsafe_allow_html=True)
 
         # Check if we're waiting for a continuation choice
+        # Handle continuation choice
         if st.session_state.awaiting_continuation_choice and st.session_state.continuation_options:
             # User is responding to continuation question
             if prompt.strip() in ["1", "2"]:
                 # Get the selected question
                 selected_question = st.session_state.continuation_options[prompt.strip()]
+
+                # Track continuation streak
+                if prompt.strip() == "2":
+                    # User selected continuation
+                    st.session_state.continuation_streak += 1
+                    st.info(f"✅ Continuation applied (Streak: {st.session_state.continuation_streak})")
+
+                    # Enable auto mode after 2 consecutive continuations
+                    if st.session_state.continuation_streak >= 2:
+                        st.session_state.auto_continuation_mode = True
+                        st.success(
+                            "🚀 **Auto-continuation mode activated!** Future related questions will automatically continue from previous context.")
+                else:
+                    # User selected standalone - reset streak and disable auto mode
+                    st.session_state.continuation_streak = 0
+                    st.session_state.auto_continuation_mode = False
+                    st.session_state.last_continuation_tables = None
+                    st.info("Standalone interpretation selected. Auto-continuation mode reset.")
 
                 # Reset continuation state
                 st.session_state.awaiting_continuation_choice = False
@@ -2669,7 +2702,6 @@ def main_app():
 
                 # Clear the loading animation and show info about the selection
                 initial_loading_placeholder.empty()
-                st.info(f"Using interpretation: {selected_question}")
 
                 # IMPORTANT: Set a flag to skip continuation detection for this interaction
                 skip_continuation_check = True
@@ -2677,6 +2709,10 @@ def main_app():
                 # User typed something else, treat as new question
                 st.session_state.awaiting_continuation_choice = False
                 st.session_state.continuation_options = None
+                # Reset streak when user types new question instead of choosing
+                st.session_state.continuation_streak = 0
+                st.session_state.auto_continuation_mode = False
+                st.session_state.last_continuation_tables = None
                 skip_continuation_check = False
         else:
             skip_continuation_check = False
@@ -2684,6 +2720,7 @@ def main_app():
         # Store the original prompt for display purposes
         original_prompt = prompt
 
+        # Check for continuation BEFORE applying corrections
         # Check for continuation BEFORE applying corrections
         if st.session_state.messages and st.session_state.last_sql_query and not skip_continuation_check:
             # Update loading animation
@@ -2695,45 +2732,104 @@ def main_app():
                     </div>
                     """, unsafe_allow_html=True)
 
+            # Check if we should auto-apply continuation
+            should_auto_apply = st.session_state.auto_continuation_mode
+
             continuation_result = check_and_handle_continuation(
                 prompt,
                 st.session_state.messages,
                 schema_text,
                 get_groq_response_with_system,
-                st.session_state.last_sql_query
+                st.session_state.last_sql_query,
+                auto_apply=should_auto_apply  # Pass the auto_apply flag
             )
 
             if continuation_result["is_continuation"]:
-                # Clear loading animation
-                initial_loading_placeholder.empty()
+                # Check if tables changed - this breaks auto-continuation mode
+                current_tables = continuation_result.get("common_tables", [])
 
-                # Show the original question in chat
-                with st.chat_message("user"):
-                    st.markdown(original_prompt)
+                # If auto-apply was used
+                if continuation_result.get("auto_applied"):
+                    # Tables changed? Reset auto mode
+                    if st.session_state.last_continuation_tables and \
+                            set(current_tables) != set(st.session_state.last_continuation_tables):
+                        st.session_state.auto_continuation_mode = False
+                        st.session_state.continuation_streak = 0
+                        st.session_state.last_continuation_tables = None
+                        st.warning("⚠️ Table context changed. Auto-continuation mode disabled.")
+                        # Show the continuation prompt since context changed
+                        initial_loading_placeholder.empty()
+                        with st.chat_message("user"):
+                            st.markdown(original_prompt)
+                        st.session_state.messages.append({"role": "user", "content": original_prompt})
+                        st.session_state.chat_history.append({"role": "user", "content": original_prompt})
 
-                # Add to history
-                st.session_state.messages.append({"role": "user", "content": original_prompt})
-                st.session_state.chat_history.append({"role": "user", "content": original_prompt})
+                        with st.chat_message("assistant"):
+                            st.markdown(continuation_result["formatted_response"])
 
-                # Show continuation options
-                with st.chat_message("assistant"):
-                    st.markdown(continuation_result["formatted_response"])
+                        st.session_state.awaiting_continuation_choice = True
+                        st.session_state.continuation_options = continuation_result["options"]
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": continuation_result["formatted_response"]})
+                        st.session_state.chat_history.append(
+                            {"role": "assistant", "content": continuation_result["formatted_response"]})
+                        save_after_exchange()
+                        st.stop()
+                    else:
+                        # Auto-apply continuation
+                        combined_question = continuation_result["combined_question"]
+                        st.session_state.last_continuation_tables = current_tables
 
-                # Save state for next interaction
-                st.session_state.awaiting_continuation_choice = True
-                st.session_state.continuation_options = continuation_result["options"]
+                        # Clear loading animation
+                        initial_loading_placeholder.empty()
 
-                # Add assistant's response to history
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": continuation_result["formatted_response"]})
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": continuation_result["formatted_response"]})
+                        # Show what happened
+                        with st.chat_message("user"):
+                            st.markdown(original_prompt)
 
-                # Save the conversation
-                save_after_exchange()
+                        st.info(f"🤖 **Auto-continuation applied:**\n\n{combined_question}", icon="✨")
 
-                # Stop here and wait for user's choice
-                st.stop()
+                        # Add both original and combined to history
+                        st.session_state.messages.append({"role": "user", "content": original_prompt})
+                        st.session_state.chat_history.append({"role": "user", "content": original_prompt})
+
+                        # Use the combined question
+                        prompt = combined_question
+                        skip_continuation_check = True
+                else:
+                    # Manual continuation prompt (normal behavior)
+                    st.session_state.last_continuation_tables = current_tables
+
+                    # Clear loading animation
+                    initial_loading_placeholder.empty()
+
+                    # Show the original question in chat
+                    with st.chat_message("user"):
+                        st.markdown(original_prompt)
+
+                    # Add to history
+                    st.session_state.messages.append({"role": "user", "content": original_prompt})
+                    st.session_state.chat_history.append({"role": "user", "content": original_prompt})
+
+                    # Show continuation options
+                    with st.chat_message("assistant"):
+                        st.markdown(continuation_result["formatted_response"])
+
+                    # Save state for next interaction
+                    st.session_state.awaiting_continuation_choice = True
+                    st.session_state.continuation_options = continuation_result["options"]
+
+                    # Add assistant's response to history
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": continuation_result["formatted_response"]})
+                    st.session_state.chat_history.append(
+                        {"role": "assistant", "content": continuation_result["formatted_response"]})
+
+                    # Save the conversation
+                    save_after_exchange()
+
+                    # Stop here and wait for user's choice
+                    st.stop()
 
         # Update loading animation for synonym correction
         with initial_loading_placeholder.container():
